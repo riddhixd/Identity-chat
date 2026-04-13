@@ -1,0 +1,104 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId}
+// Fields:
+//   - uid: string (required)
+//   - email: string (required)
+//   - displayName: string (optional)
+//   - photoURL: string (optional)
+//   - personalityProfile: map (optional)
+//
+// Collection: chats
+// Document ID: {chatId}
+// Fields:
+//   - userId: string (required) - Owner of the chat
+//   - type: string (required, enum: ['alter-ego', 'split-personality'])
+//   - title: string (required)
+//   - createdAt: timestamp (required)
+//   - lastMessageAt: timestamp (required)
+//   - config: map (optional)
+//   - isSaved: bool (optional)
+//
+// Collection: chats/{chatId}/messages
+// Document ID: {messageId}
+// Fields:
+//   - chatId: string (required)
+//   - userId: string (required)
+//   - role: string (required, enum: ['user', 'model'])
+//   - content: string (required, max 5000 chars)
+//   - agentType: string (optional)
+//   - emotions: map (optional)
+//   - confidenceMetrics: map (optional)
+//   - timestamp: timestamp (required)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isChatOwner(chatId) {
+      return isAuthenticated() && get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid == request.auth.uid &&
+             data.email is string && data.email.size() > 0 &&
+             (!('personalityProfile' in data) || data.personalityProfile is map);
+    }
+
+    function isValidChat(data) {
+      return data.keys().hasAll(['userId', 'type', 'title', 'createdAt', 'lastMessageAt']) &&
+             data.userId == request.auth.uid &&
+             data.type in ['alter-ego', 'split-personality'] &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['chatId', 'userId', 'role', 'content', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             data.role in ['user', 'model'] &&
+             data.content is string && data.content.size() > 0 && data.content.size() < 5000;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    match /chats/{chatId} {
+      allow read: if isOwner(resource.data.userId);
+      allow create: if isAuthenticated() && isValidChat(request.resource.data);
+      allow update: if isOwner(resource.data.userId) && isValidChat(request.resource.data);
+      allow delete: if isOwner(resource.data.userId);
+
+      match /messages/{messageId} {
+        allow read: if isChatOwner(chatId);
+        allow create: if isChatOwner(chatId) && isValidMessage(request.resource.data);
+        allow update: if false; // Messages are immutable for now
+        allow delete: if isChatOwner(chatId);
+      }
+    }
+  }
+}
